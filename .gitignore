@@ -1,0 +1,26 @@
+# Secrets — PLEX_TOKEN lives here
+.env
+
+# Virtualenvs — pattern is generic on purpose. Naming one venv per platform
+# (.win-venv, .nix-venv, .venv) is normal here, and an unlisted name means a
+# thousand site-packages files silently staged.
+*venv/
+venv/
+.venv/
+.win-venv/
+.nix-venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Release watch state — local to each install
+release_ledger.json
