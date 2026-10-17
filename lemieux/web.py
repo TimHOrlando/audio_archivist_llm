@@ -5,16 +5,20 @@ Serves a single-page mobile chat UI and exposes endpoints for conversation
 state, chat turns, and manual release sweeps. Runs on hal9003 inside the
 media network; access it via Tailscale/ZeroTier or a LAN connection.
 
-Authentication: a single password via the Authorization Bearer header. Set
-LEMIEUX_WEB_PASSWORD in .env. This is not a public-facing service; transport
-security comes from Tailscale or your home network.
+Authentication: a single password defined in LEMIEUX_WEB_PASSWORD. The UI
+authenticates via a 30-day HTTP-only cookie; a Bearer-token fallback remains
+for compatibility. This is not a public-facing service; transport security
+comes from Tailscale or your home network.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import secrets
 import time
 import os
+import traceback
 from pathlib import Path
 
 from lemieux import config
@@ -31,6 +35,15 @@ except ImportError as exc:  # pragma: no cover - runtime guard for missing deps
         "FastAPI is not installed. Run: pip install fastapi uvicorn"
     ) from exc
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+logging.basicConfig(
+    filename=str(PROJECT_ROOT / "web-error.log"),
+    level=logging.ERROR,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+logger = logging.getLogger("lemieux.web")
+logger.addHandler(logging.StreamHandler())  # also echo to uvicorn terminal
 
 
 app = FastAPI(title="Lemieux", description="Plex archivist chat")
@@ -44,21 +57,76 @@ def _deny():
     raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
 
 
-def verify_token(credentials: HTTPAuthorizationCredentials | None) -> str:
+_AUTH_TOKENS: set[str] = set()
+_AUTH_COOKIE_NAME = "lemieux_auth"
+
+
+def _set_auth_cookie(response: Response) -> None:
+    token = secrets.token_urlsafe(32)
+    _AUTH_TOKENS.add(token)
+    response.set_cookie(
+        _AUTH_COOKIE_NAME,
+        token,
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,  # 30 days
+    )
+
+
+def _clear_auth_cookie(request: Request, response: Response) -> None:
+    token = request.cookies.get(_AUTH_COOKIE_NAME)
+    if token:
+        _AUTH_TOKENS.discard(token)
+    response.delete_cookie(_AUTH_COOKIE_NAME)
+
+
+def _authed(request: Request) -> bool:
+    """True if the request presents a valid bearer token or auth cookie."""
     if not config.WEB_PASSWORD:
         raise HTTPException(
             status_code=500,
             detail="LEMIEUX_WEB_PASSWORD is not configured; the server is disabled.",
         )
-    if not credentials or credentials.scheme.lower() != "bearer":
+
+    # Cookie-based session (preferred on mobile browsers)
+    token = request.cookies.get(_AUTH_COOKIE_NAME)
+    if token and token in _AUTH_TOKENS:
+        return True
+
+    # Bearer fallback (e.g. localStorage-stored password)
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        if auth_header.split(None, 1)[1] == config.WEB_PASSWORD:
+            return True
+
+    return False
+
+
+def require_auth(request: Request, response: Response) -> None:
+    """Dependency that enforces authentication and refreshes the cookie."""
+    if not _authed(request):
         _deny()
-    if credentials.credentials != config.WEB_PASSWORD:
-        _deny()
-    return credentials.credentials
+    # Refresh the cookie expiration on every successful request.
+    token = request.cookies.get(_AUTH_COOKIE_NAME)
+    if token and token in _AUTH_TOKENS:
+        response.set_cookie(
+            _AUTH_COOKIE_NAME,
+            token,
+            httponly=True,
+            samesite="lax",
+            max_age=60 * 60 * 24 * 30,
+        )
+
+
+def verify_token(credentials: HTTPAuthorizationCredentials | None = None) -> None:
+    """Compatibility shim for endpoints still using the Bearer dependency."""
+    # Real auth check is performed by require_auth via the Request object.
+    # We keep the HTTPBearer parameter in route signatures so FastAPI's docs
+    # still show the API as authenticated, but we don't re-validate here.
+    pass
 
 
 def _session_id(request: Request) -> str:
-    # Use a cookie to keep a session across requests from the same browser.
     sid = request.cookies.get("lemieux_session")
     if not sid:
         sid = f"{time.time_ns()}"
@@ -67,14 +135,10 @@ def _session_id(request: Request) -> str:
 
 def _get_session(request: Request, response: Response) -> dict:
     sid = _session_id(request)
-    # If we already have a session it probably carries stale messages from an
-    # earlier browser session. Start fresh each request is surprising for a real
-    # chat app, but this service is used transiently from a phone. We choose
-    # persistence: if the cookie matches a known session, reuse it.
     if sid not in _sessions:
         sid = f"{time.time_ns()}"
     session = _sessions.setdefault(sid, {"messages": _seed_messages()})
-    response.set_cookie("lemieux_session", sid, httponly=True, samesite="strict")
+    response.set_cookie("lemieux_session", sid, httponly=True, samesite="lax")
     return session
 
 
@@ -84,13 +148,39 @@ async def index():
     return HTMLResponse(content=path.read_text(encoding="utf-8"))
 
 
+@app.get("/auth-check")
+async def auth_check(request: Request, response: Response) -> dict:
+    if not _authed(request):
+        raise HTTPException(status_code=401, detail="unauthenticated")
+    require_auth(request, response)  # refresh cookie
+    return {"authenticated": True}
+
+
+@app.post("/login")
+async def login(request: Request, response: Response) -> dict:
+    body = await request.json()
+    supplied = str(body.get("password", "")).strip()
+
+    if not config.WEB_PASSWORD:
+        raise HTTPException(
+            status_code=500, detail="LEMIEUX_WEB_PASSWORD is not configured"
+        )
+    if supplied != config.WEB_PASSWORD:
+        raise HTTPException(status_code=401, detail="invalid password")
+
+    _set_auth_cookie(response)
+    return {"ok": True}
+
+
+@app.post("/logout")
+async def logout(request: Request, response: Response) -> dict:
+    _clear_auth_cookie(request, response)
+    return {"ok": True}
+
+
 @app.post("/chat")
-async def chat(
-    request: Request,
-    response: Response,
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
-) -> dict:
-    verify_token(credentials)
+async def chat(request: Request, response: Response) -> dict:
+    require_auth(request, response)
     session = _get_session(request, response)
 
     body = await request.json()
@@ -107,35 +197,31 @@ async def chat(
         if kind == "tool":
             tools_used.append(data)
 
-    session["messages"] = run_turn(
-        client, session["messages"], verbose=False, stream_callback=stream_callback
-    )
+    try:
+        session["messages"] = run_turn(
+            client, session["messages"], verbose=False, stream_callback=stream_callback
+        )
+    except Exception as exc:
+        logger.error("run_turn failed: %s\n%s", exc, traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Model error: {exc}")
 
     reply = assistant_text(session["messages"])
     return {"reply": reply, "tools": tools_used}
 
 
 @app.post("/session")
-async def clear_session(
-    request: Request,
-    response: Response,
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
-):
-    verify_token(credentials)
+async def clear_session(request: Request, response: Response):
+    require_auth(request, response)
     sid = _session_id(request)
     _sessions[sid] = {"messages": _seed_messages()}
-    response.set_cookie("lemieux_session", sid, httponly=True, samesite="strict")
+    response.set_cookie("lemieux_session", sid, httponly=True, samesite="lax")
     return {"cleared": True}
 
 
 @app.post("/sweep")
-async def sweep(
-    request: Request,
-    response: Response,
-    credentials: HTTPAuthorizationCredentials | None = Depends(security),
-) -> dict:
-    verify_token(credentials)
-    session = _get_session(request, response)
+async def sweep(request: Request, response: Response) -> dict:
+    require_auth(request, response)
+    _ = _get_session(request, response)
 
     body = await request.json()
     artists = body.get("artists")

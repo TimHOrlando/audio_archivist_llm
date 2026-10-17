@@ -34,6 +34,9 @@
       <button id="clear-btn" class="text-xs text-stone-400 hover:text-stone-200 px-2 py-2">
         Clear
       </button>
+      <button id="logout-btn" class="text-xs text-stone-400 hover:text-stone-200 px-2 py-2" title="Clear stored password">
+        Log out
+      </button>
     </div>
   </header>
 
@@ -79,6 +82,7 @@
       <input id="password-input" type="password" class="w-full bg-stone-900 border border-stone-700 rounded px-3 py-2 mb-4 text-sm" placeholder="Password">
       <button id="password-submit" class="w-full bg-amber-600 hover:bg-amber-500 text-stone-900 font-semibold py-2 rounded text-sm">Open</button>
       <p id="password-error" class="text-red-400 text-xs mt-2 hidden">Incorrect password.</p>
+      <p id="password-help" class="text-stone-500 text-xs mt-2">If this keeps appearing, use the Log out button and re-enter.</p>
     </div>
   </div>
 
@@ -93,13 +97,51 @@
     const passwordSubmit = document.getElementById('password-submit');
     const passwordError = document.getElementById('password-error');
 
-    let password = localStorage.getItem('lemieux-password') || '';
-    if (password) passwordModal.classList.add('hidden');
+    async function checkAuth() {
+      // The server sets a session cookie on login. If present, this request
+      // succeeds and the UI stays unlocked.
+      try {
+        const res = await fetch('/auth-check', {
+          method: 'GET',
+          credentials: 'same-origin',
+        });
+        if (res.ok) {
+          passwordModal.classList.add('hidden');
+          return;
+        }
+      } catch (e) {
+        // network offline or CORS issue; show the modal and let the user try
+      }
+      passwordModal.classList.remove('hidden');
+      passwordInput.value = '';
+      passwordInput.focus();
+    }
 
-    passwordSubmit.addEventListener('click', () => {
-      password = passwordInput.value;
-      localStorage.setItem('lemieux-password', password);
-      passwordModal.classList.add('hidden');
+    checkAuth();
+
+    passwordSubmit.addEventListener('click', async () => {
+      const value = passwordInput.value.trim();
+      if (!value) return;
+
+      try {
+        const res = await fetch('/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ password: value }),
+        });
+        if (!res.ok) {
+          passwordError.classList.remove('hidden');
+          return;
+        }
+        passwordError.classList.add('hidden');
+        passwordModal.classList.add('hidden');
+        // Also keep a fallback copy in localStorage for fetch headers if needed
+        localStorage.setItem('lemieux-password', value);
+      } catch (e) {
+        passwordError.textContent = 'Could not reach server.';
+        passwordError.classList.remove('hidden');
+      }
     });
 
     function escapeHtml(text) {
@@ -143,18 +185,27 @@
     }
 
     async function apiCall(path, body) {
+      const headers = { 'Content-Type': 'application/json' };
+      // Fallback to localStorage bearer token. Primary auth is the
+      // lemieux_auth cookie, but this keeps requests working across
+      // browsers that drop cookies or for users who reloaded before
+      // the cookie was set.
+      const fallbackPwd = localStorage.getItem('lemieux-password');
+      if (fallbackPwd) {
+        headers['Authorization'] = `Bearer ${fallbackPwd}`;
+      }
       const res = await fetch(path, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${password}`
-        },
+        headers: headers,
+        credentials: 'same-origin',
         body: JSON.stringify(body)
       });
       if (res.status === 401) {
         localStorage.removeItem('lemieux-password');
-        passwordModal.classList.remove('hidden');
         passwordError.classList.remove('hidden');
+        passwordModal.classList.remove('hidden');
+        passwordInput.value = '';
+        passwordInput.focus();
         throw new Error('Unauthorized');
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -183,6 +234,13 @@
     document.getElementById('clear-btn').addEventListener('click', () => {
       messagesEl.innerHTML = '';
       apiCall('/session', {});
+    });
+
+    document.getElementById('logout-btn').addEventListener('click', async () => {
+      await fetch('/logout', { method: 'POST', credentials: 'same-origin' });
+      localStorage.removeItem('lemieux-password');
+      passwordInput.value = '';
+      checkAuth();
     });
 
     document.getElementById('sweep-btn').addEventListener('click', async () => {
