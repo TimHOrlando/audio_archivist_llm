@@ -11,35 +11,36 @@ Two jobs:
 1. **Library interrogation** — query Plex holdings, read FLAC tags, audit
    folder naming against collection standards.
 2. **Release watch** — sweep for Grateful Dead, Jerry Garcia, Jerry Garcia
-   Band and Dead & Company releases not already held, and report only what is
-   genuinely new.
+   Band and Dead & Company releases not already held, and keep reporting them
+   until they are acquired.
 
 **Still read-only.** No tool in this package can write, move, rename, or
-delete anything in the media library. Write capability is a deliberate later
-addition, not a flag.
+   hard-delete anything in the media library. Write capability is a deliberate
+   later addition, not a flag.
 
 ## Layout
 
 ```
-Modelfile               persona + policy (the system prompt lives here)
-Modelfile.local         same prompt, local model base
+Modelfile                 persona + policy (the system prompt lives here)
+Modelfile.local           same prompt, local model base
 requirements.txt
-.env.example            copy to .env and fill in
+.env.example              copy to .env and fill in
+release_ledger.json       per-install state: what the watch has reported
 lemieux/
-  config.py             paths, jail roots, collection conventions, .env loader
-  safety.py             path jail, row caps, token scrubbing — the enforcement
-  matching.py           title normalization and holdings comparison
-  ledger.py             what the watch has already reported
-  notify.py             email (full report) and SMS (short alert)
-  prompt.py             pulls the SYSTEM block out of the Modelfile
-  registry.py           tool schemas + dispatch
-  agent.py              tool-calling loop and interactive CLI
-  watch.py              release sweep, for cron
+  config.py               paths, jail roots, collection conventions, .env loader
+  safety.py               path jail, row caps, token scrubbing — the enforcement
+  matching.py             title normalization and holdings comparison
+  ledger.py               what the watch has already reported
+  notify.py               email (full backlog) and SMS (current sweep only)
+  prompt.py               pulls the SYSTEM block out of the Modelfile
+  registry.py             tool schemas + dispatch
+  agent.py                tool-calling loop and interactive CLI
+  watch.py                release sweep, for cron
   tools/
-    plex.py             plex_query  — sections, search, albums, tracks,
-                                      inventory, have
-    fs.py               fs_inspect  — list, stat, tags, audit, find, read_text
-    search.py           web_search  — release announcements (untrusted input)
+    plex.py               plex_query  — sections, search, albums, tracks,
+                                        inventory, have
+    fs.py                 fs_inspect  — list, stat, tags, audit, find, read_text
+    search.py             web_search  — release announcements (untrusted input)
 ```
 
 ## Setup
@@ -64,11 +65,11 @@ surfaces as `does not support chat`.)
 ## Use
 
 ```bash
-python -m lemieux.agent                          # REPL
+python -m lemieux.agent                          # interactive REPL
 python -m lemieux.agent "list the library sections"
 
 python -m lemieux.watch --artist "Jerry Garcia Band"
-python -m lemieux.watch --notify                 # all configured artists
+python -m lemieux.watch --notify                 # sweep all artists and notify
 python -m lemieux.watch --ledger                 # what has been reported
 python -m lemieux.watch --notify-check           # notification config
 ```
@@ -127,22 +128,26 @@ earned their place the hard way:
   `Live at The Warfield (Jerry Garcia Band)` cannot produce different
   verdicts. A verdict is a fact about the library, not about phrasing.
 
-### The watch does not repeat itself
+### The watch keeps reminding you about gaps
 
-A scheduled watch that reports the same releases every week gets ignored, and
-then a genuinely new one is missed. `ledger.py` records what was reported and
-suppresses it unless something material changed: the verdict, the status, or —
-for a release that has not shipped yet — the date.
+The ledger records every reported release, but only **held** releases are
+suppressed from future reports. A release that remains `not_held` is
+re-reported every sweep and re-sent by email/SMS until it is acquired. The
+ledger survives restarts and does not forget what was announced.
 
 Dates are deliberately *not* a trigger for already-released titles. They are
 extracted from web pages, and one release legitimately carries several
-(announcement, street, streaming). Treating every variation as news re-reports
-the same record forever.
+(announcement, street, streaming). Treating every variation as news would
+re-report the same held record forever, so only a verdict change to `held`
+silences a previously reported gap.
 
 Commit happens once, last, after the report is written. Recording before
 reporting would mean a run that died mid-way silences those releases
 permanently. A corrupt ledger raises rather than degrading to empty, because
 "empty" would silently re-report everything.
+
+Set `LEMIEUX_LEDGER_SUPPRESS_ONLY_HELD=0` to restore the legacy behavior where
+releases are silenced after one report unless verdict/status/date changes.
 
 ### Search results are untrusted
 
@@ -152,18 +157,34 @@ agent would be planted. Nothing in a search result can authorize an action.
 
 ## Notifications
 
-Email carries the full report; SMS carries one line, because carrier gateways
-mangle long messages. Nothing is sent unless the sweep found something, unless
-`LEMIEUX_NOTIFY_ON=always`.
+Only releases with a **definite `not_held` verdict** trigger an email or SMS.
+`uncertain` releases are still committed to the ledger, so they are not lost,
+but they never ping you — a human decision is required first.
+
+**Email** carries a concise list of **every** `not_held` release currently in
+the ledger: title, release date or pre-sale status, and source URL. The subject
+line shows how many are new this sweep and how many are still open in total.
+
+**SMS** carries a one-line alert about **only this sweep's** `not_held`
+findings: the count, the first release title, and its source URL.
+
+Both bodies are templatable through `.env` (see `LEMIEUX_EMAIL_TEMPLATE`,
+`LEMIEUX_EMAIL_RELEASE_TEMPLATE`, `LEMIEUX_SMS_TEMPLATE`,
+`LEMIEUX_SMS_MORE_TEMPLATE`, and `LEMIEUX_SMS_MAX_CHARS` in `.env.example`).
 
 Whether to notify is read from the `release_ledger` commit **tool result**,
 not from the report prose — so a phone buzzing is a fact about what was
 recorded, not a function of how the model phrased its summary.
 
+Nothing is sent unless the sweep found a `not_held` gap this run, unless
+`LEMIEUX_NOTIFY_ON=always`. A quiet sweep is a successful sweep.
+
 Gmail requires an App Password; plain-password SMTP is rejected.
 
 Carrier email-to-SMS gateways are being retired by several carriers. If texts
-stop arriving while email still works, the gateway is the first suspect.
+stop arriving while email still works, the gateway is the first suspect. Raw
+URLs are used for now; a short-link adapter can be added later without changing
+the templates.
 
 ## Not yet built
 

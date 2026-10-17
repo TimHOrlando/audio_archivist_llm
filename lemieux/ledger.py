@@ -36,10 +36,13 @@ LEDGER_PATH = Path(
     os.getenv("LEMIEUX_LEDGER", str(PROJECT_ROOT / "release_ledger.json"))
 )
 
-# Re-surface a still-unacquired release after this many days. 0 = never.
-# Default off: a nagging watch trains you to ignore it just as surely as a
-# repetitive one.
-REMIND_AFTER_DAYS = int(os.getenv("LEMIEUX_LEDGER_REMIND_DAYS", "0"))
+# A release is kept in the ledger so we know what was announced, but only
+# releases actually held in the library are suppressed from future reports.
+# If a release remains not_held, it is re-reported every sweep until it is
+# acquired (or its verdict changes to held).
+SUPPRESS_ONLY_HELD = (
+    os.getenv("LEMIEUX_LEDGER_SUPPRESS_ONLY_HELD", "1").lower() not in ("0", "false", "no")
+)
 
 _SCHEMA_VERSION = 1
 
@@ -201,7 +204,13 @@ def check(
     release_date: str | None = None,
     status: str | None = None,
 ) -> dict:
-    """Should this release appear in the current report?"""
+    """Should this release appear in the current report?
+
+    With SUPPRESS_ONLY_HELD (default), a release is re-reported every sweep
+    until its Plex verdict becomes 'held'. Once it is held, further reports
+    are suppressed. This keeps Tim notified about genuine gaps until they are
+    filled, rather than silencing them after one mention.
+    """
     if not title or not title.strip():
         raise LedgerError("A title is required.")
 
@@ -219,43 +228,50 @@ def check(
             "previously_reported": False,
         }
 
-    change = _changed(prior, verdict, release_date, status)
-    if change:
+    if verdict == "held":
         return {
             "title": title,
-            "should_report": True,
-            "reason": f"Previously reported, but {change}.",
+            "should_report": False,
+            "reason": "Held in the library; no further reminders needed.",
             "previously_reported": True,
             "first_reported": prior.get("first_reported"),
-            "prior": {
-                "verdict": prior.get("verdict"),
-                "release_date": prior.get("release_date"),
-                "status": prior.get("status"),
-            },
+            "times_reported": prior.get("times_reported", 1),
         }
 
-    if REMIND_AFTER_DAYS > 0 and prior.get("last_reported"):
-        try:
-            last = _dt.date.fromisoformat(prior["last_reported"])
-            age = (_dt.date.today() - last).days
-            if age >= REMIND_AFTER_DAYS and verdict != "held":
-                return {
-                    "title": title,
-                    "should_report": True,
-                    "reason": f"Still unacquired {age} days after last report.",
-                    "previously_reported": True,
-                    "first_reported": prior.get("first_reported"),
-                }
-        except ValueError:
-            pass
+    if not SUPPRESS_ONLY_HELD:
+        # Legacy behavior: only report when something materially changed.
+        change = _changed(prior, verdict, release_date, status)
+        if change:
+            return {
+                "title": title,
+                "should_report": True,
+                "reason": f"Previously reported, but {change}.",
+                "previously_reported": True,
+                "first_reported": prior.get("first_reported"),
+                "prior": {
+                    "verdict": prior.get("verdict"),
+                    "release_date": prior.get("release_date"),
+                    "status": prior.get("status"),
+                },
+            }
 
+        return {
+            "title": title,
+            "should_report": False,
+            "reason": (
+                f"Already reported on {prior.get('last_reported', 'an earlier run')} "
+                f"with nothing changed since. Leave it out of this report."
+            ),
+            "previously_reported": True,
+            "first_reported": prior.get("first_reported"),
+            "times_reported": prior.get("times_reported", 1),
+        }
+
+    # Default behavior: re-report not_held/uncertain until they become held.
     return {
         "title": title,
-        "should_report": False,
-        "reason": (
-            f"Already reported on {prior.get('last_reported', 'an earlier run')} "
-            f"with nothing changed since. Leave it out of this report."
-        ),
+        "should_report": True,
+        "reason": "Still not held in the library; re-reporting until acquired.",
         "previously_reported": True,
         "first_reported": prior.get("first_reported"),
         "times_reported": prior.get("times_reported", 1),
@@ -292,7 +308,7 @@ def commit(entries: list[dict]) -> dict:
         key = existing_key or ledger_key(title)
         prior = prior or {}
 
-        releases[key] = {
+        merged = {
             "title": title,
             "verdict": entry.get("verdict") or prior.get("verdict"),
             "release_date": entry.get("release_date") or prior.get("release_date"),
@@ -302,7 +318,8 @@ def commit(entries: list[dict]) -> dict:
             "last_reported": today,
             "times_reported": prior.get("times_reported", 0) + 1,
         }
-        recorded.append(title)
+        releases[key] = merged
+        recorded.append(merged)
 
     save(data)
 

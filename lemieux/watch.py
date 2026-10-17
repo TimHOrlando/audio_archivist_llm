@@ -97,14 +97,20 @@ report and nothing else:
 """
 
 
-def committed_titles(messages: list[dict]) -> list[str]:
-    """Titles the ledger actually recorded this run.
+def committed_entries(messages: list[dict]) -> list[dict]:
+    """Structured releases the ledger actually recorded this run.
 
-    Read from the release_ledger 'commit' tool RESULT, not from the report
-    prose. Whether to notify is a factual question, and parsing it out of
-    model-written text would make a cron job's behavior depend on phrasing.
+    Each entry is {title, verdict, release_date, status, url} as supplied to
+    release_ledger('commit', entries_list=...). Only 'not_held' verdicts will
+    trigger notifications, but all committed entries are returned for logging
+    and the ledger UI.
+
+    Read from the tool RESULT, not from the report prose. Whether a release
+    was reported is a factual question, and parsing it from model-written text
+    would make unattended behavior depend on wording.
     """
-    titles: list[str] = []
+    entries: list[dict] = []
+    seen: set[str] = set()
     for message in messages:
         if message.get("role") != "tool" or message.get("name") != "release_ledger":
             continue
@@ -112,14 +118,18 @@ def committed_titles(messages: list[dict]) -> list[str]:
             payload = json.loads(message.get("content") or "{}")
         except json.JSONDecodeError:
             continue
-        for title in payload.get("recorded") or []:
-            if title not in titles:
-                titles.append(title)
-    return titles
+        for entry in payload.get("recorded") or []:
+            if not isinstance(entry, dict):
+                continue
+            title = entry.get("title")
+            if title and title not in seen:
+                seen.add(title)
+                entries.append(entry)
+    return entries
 
 
-def run_sweep(artists: list[str], verbose: bool = True) -> tuple[str, list[str]]:
-    """Run one sweep. Returns (report text, titles recorded this run)."""
+def run_sweep(artists: list[str], verbose: bool = True) -> tuple[str, list[dict]]:
+    """Run one sweep. Returns (report text, structured entries recorded this run)."""
     client = _get_client()
     messages = _seed_messages()
     messages.append(
@@ -136,7 +146,7 @@ def run_sweep(artists: list[str], verbose: bool = True) -> tuple[str, list[str]]
     # Every assistant message, not just the last: the report is often written
     # alongside the final commit call, and taking messages[-1] would return
     # only the closing acknowledgement.
-    return assistant_text(messages), committed_titles(messages)
+    return assistant_text(messages), committed_entries(messages)
 
 
 def main() -> int:
@@ -208,7 +218,7 @@ def main() -> int:
     if not args.quiet:
         print(f"Sweeping: {', '.join(artists)}\n", flush=True)
 
-    report, found = run_sweep(artists, verbose=not args.quiet)
+    report, entries = run_sweep(artists, verbose=not args.quiet)
 
     print("\n" + report)
 
@@ -221,20 +231,23 @@ def main() -> int:
             print(f"Could not write report to {args.report}: {exc}", file=sys.stderr)
             return 1
 
-    if not args.notify and found:
+    not_held_count = sum(
+        1 for entry in entries if entry.get("verdict") == "not_held"
+    )
+    if not args.notify and entries:
         from .notify import configured
 
         if configured()["email_to"] or configured()["sms_to"]:
             print(
-                f"\n[{len(found)} finding(s) recorded — rerun with --notify to "
-                f"email/text them]",
+                f"\n[{len(entries)} finding(s) recorded ({not_held_count} "
+                f"not_held) — rerun with --notify to email/text them]",
                 file=sys.stderr,
             )
 
     if args.notify:
         from .notify import notify
 
-        outcome = notify(report, len(found), found)
+        outcome = notify(report, entries)
         if not args.quiet:
             print(f"\nNotify: {json.dumps(outcome)}", file=sys.stderr)
         if outcome.get("errors"):

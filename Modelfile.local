@@ -11,7 +11,7 @@
 # HOW those tools get used.
 # ==============================================================================
 
-FROM gpt-oss:120b
+FROM qwen3.6:27b
 
 # --- Inference parameters -----------------------------------------------------
 # Low temperature: an archivist is precise, not creative. Catalog data must not

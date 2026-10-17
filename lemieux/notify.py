@@ -1,18 +1,17 @@
 """
-Notification — getting a sweep report off the server and to Tim.
+Notification — getting the release watch results off the server and to Tim.
 
-Email carries the full report. SMS carries a short alert, because a carrier
-gateway will mangle or silently truncate anything long and a multi-page
-release report delivered as twelve fragmented texts is worse than no text at
-all.
+Email carries every release that is currently not_held in the ledger: title,
+release date or pre-sale status, and source URL. SMS carries a short alert
+about just this sweep's new not_held findings, with the first title and its
+source URL. Both bodies are templatable via the environment.
 
-Nothing is sent unless the sweep actually found something, unless
-LEMIEUX_NOTIFY_ON=always. A watch that mails "nothing new" every week trains
-you to filter it, and then the one that matters goes unread too.
+Only releases with a 'not_held' verdict are included. 'uncertain' releases are
+still committed to the ledger but never appear in email or SMS — a human call
+is required first.
 
-Credentials come from the environment, never from code or the repo. For Gmail
-that means an App Password (Google account -> Security -> 2-Step Verification
--> App passwords), not the account password: Gmail refuses plain-password SMTP.
+Nothing is sent unless the sweep actually found a not_held gap, unless
+LEMIEUX_NOTIFY_ON=always.
 """
 
 from __future__ import annotations
@@ -34,8 +33,23 @@ SMS_TO = os.getenv("LEMIEUX_SMS_TO", "")
 # "findings" (default) or "always".
 NOTIFY_ON = os.getenv("LEMIEUX_NOTIFY_ON", "findings").lower()
 
+# Plain-text templates, overridable from .env.
+EMAIL_TEMPLATE = os.getenv(
+    "LEMIEUX_EMAIL_TEMPLATE",
+    "Lemieux found {count} new release(s):\n\n{releases}\n",
+)
+EMAIL_RELEASE_TEMPLATE = os.getenv(
+    "LEMIEUX_EMAIL_RELEASE_TEMPLATE",
+    "• {title} — {status_date}\n  {url}",
+)
+SMS_TEMPLATE = os.getenv(
+    "LEMIEUX_SMS_TEMPLATE",
+    "Lemieux: {count} new — {title}{more} {url}",
+)
+SMS_MORE_TEMPLATE = os.getenv("LEMIEUX_SMS_MORE_TEMPLATE", " +{extra_count} more")
+
 # Carrier gateways reject or split long messages. Keep well under the limit.
-SMS_MAX_CHARS = 300
+SMS_MAX_CHARS = int(os.getenv("LEMIEUX_SMS_MAX_CHARS", "300"))
 
 
 class NotifyError(Exception):
@@ -52,6 +66,12 @@ def configured() -> dict:
         "email_to": EMAIL_TO or None,
         "sms_to": SMS_TO or None,
         "notify_on": NOTIFY_ON,
+        "email_template_set": EMAIL_TEMPLATE != (
+            "Lemieux found {count} new release(s):\n\n{releases}\n"
+        ),
+        "sms_template_set": SMS_TEMPLATE != (
+            "Lemieux: {count} new — {title}{more} {url}"
+        ),
     }
 
 
@@ -85,17 +105,133 @@ def _send(to_address: str, subject: str, body: str) -> None:
         raise NotifyError(f"Could not send to {to_address}: {exc}") from exc
 
 
-def _sms_text(finding_count: int, titles: list[str]) -> str:
-    """Short alert. The detail lives in the email."""
-    if finding_count == 1 and titles:
-        text = f"Lemieux: 1 new release — {titles[0]}"
+def _maybe_shorten(url: str) -> str:
+    """Placeholder for a short-link / redirect service.
+
+    When a service is configured (e.g. LEMIEUX_SHORTENER_URL), this becomes
+    the integration point. For now the original URL is returned unchanged.
+    """
+    return url
+
+
+def _not_held_entries(entries: list[dict]) -> list[dict]:
+    """Filter to definite gaps only; uncertain releases are not notified."""
+    return [
+        entry
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("verdict") == "not_held"
+    ]
+
+
+def _ledger_not_held() -> list[dict]:
+    """All not_held releases currently tracked in the ledger.
+
+    The email is the persistent inbox for all holes in the library, while the
+    SMS is a tap on the shoulder for the current sweep only.
+    """
+    from .ledger import entries
+
+    data = entries()
+    return _not_held_entries(data.get("releases", []))
+
+
+def _status_date_fragment(entry: dict) -> str:
+    """Combine status and release date into one clean fragment.
+
+    Examples:
+      pre_order + date  -> "pre-sale — 2025-11-21"
+      announced + no date -> "announced"
+      no status + date -> "2025-11-21"
+      neither -> ""
+    """
+    raw_status = (entry.get("status") or "").strip()
+    release_date = (entry.get("release_date") or "").strip()
+    status_lower = raw_status.lower().replace(" ", "_").replace("-", "_")
+
+    if status_lower in {"pre_order", "preorder"}:
+        status_line = "pre-sale"
+    elif status_lower in {"released", "announced", "upcoming", "pending"}:
+        status_line = raw_status.lower()
+    elif raw_status:
+        status_line = raw_status
     else:
-        text = f"Lemieux: {finding_count} new releases"
-        if titles:
-            text += f" — {titles[0]}"
-            if len(titles) > 1:
-                text += f" +{len(titles) - 1} more"
-    text += ". Details in email."
+        status_line = ""
+
+    if status_line and release_date:
+        return f"{status_line} — {release_date}"
+    return status_line or release_date
+
+
+def _format_email_release(entry: dict) -> str:
+    """Format a single release for the email body."""
+    title = (entry.get("title") or "Unknown release").strip()
+    url = _maybe_shorten((entry.get("url") or "").strip())
+    status_date = _status_date_fragment(entry)
+
+    # Provide backward-compatible variables so custom templates can still use
+    # {status} and {date} separately if desired.
+    raw_status = (entry.get("status") or "").strip()
+    status_lower = raw_status.lower().replace(" ", "_").replace("-", "_")
+    if status_lower in {"pre_order", "preorder"}:
+        status = "pre-sale"
+    elif raw_status:
+        status = raw_status.lower()
+    else:
+        status = ""
+    date = (entry.get("release_date") or "").strip()
+
+    return EMAIL_RELEASE_TEMPLATE.format(
+        title=title,
+        url=url,
+        status=f"{status} " if status else "",
+        date=f" — {date}" if date else "",
+        status_date=status_date,
+    )
+
+
+def _email_body(entries: list[dict]) -> str:
+    """Build the concise email body from all ledger not_held releases."""
+    # Start with the current sweep's entries so the most recently discovered
+    # gaps appear first, then append the rest of the ledger not yet held.
+    gaps = _not_held_entries(entries)
+    seen = {entry.get("title", "") for entry in gaps}
+
+    for entry in _ledger_not_held():
+        title = entry.get("title", "")
+        if title and title not in seen:
+            seen.add(title)
+            gaps.append(entry)
+
+    if not gaps:
+        return ""
+
+    release_lines = [_format_email_release(entry) for entry in gaps]
+    return EMAIL_TEMPLATE.format(
+        count=len(gaps),
+        releases="\n".join(release_lines),
+    )
+
+
+def _sms_body(entries: list[dict]) -> str:
+    """Build a short, link-bearing SMS alert from this sweep's not_held entries."""
+    gaps = _not_held_entries(entries)
+    if not gaps:
+        return ""
+
+    first = gaps[0]
+    title = (first.get("title") or "Unknown release").strip()
+    url = _maybe_shorten((first.get("url") or "").strip())
+
+    more = ""
+    if len(gaps) > 1:
+        more = SMS_MORE_TEMPLATE.format(extra_count=len(gaps) - 1)
+
+    text = SMS_TEMPLATE.format(
+        count=len(gaps),
+        title=title,
+        more=more,
+        url=url,
+    )
 
     if len(text) > SMS_MAX_CHARS:
         text = text[: SMS_MAX_CHARS - 1] + "…"
@@ -104,38 +240,63 @@ def _sms_text(finding_count: int, titles: list[str]) -> str:
 
 def notify(
     report: str,
-    finding_count: int,
-    titles: list[str] | None = None,
+    entries: list[dict],
     subject_prefix: str = "Lemieux release watch",
 ) -> dict:
-    """Send the report. Returns what was sent and what was skipped."""
-    titles = titles or []
+    """Send the report. Returns what was sent and what was skipped.
+
+    `report` is kept for logging/backward compatibility but is no longer the
+    email body.
+
+    SMS is built from this sweep's not_held entries only. Email lists every
+    not_held release in the ledger, so the inbox is a complete view of holes
+    yet to be filled.
+    """
+    # Preserve compatibility: a plain list of strings could be passed by an
+    # older caller; turn it into minimal structured entries.
+    structured: list[dict]
+    if entries and isinstance(entries[0], str):
+        structured = [{"title": entry, "verdict": "not_held"} for entry in entries]
+    else:
+        structured = [
+            entry for entry in entries if isinstance(entry, dict)
+        ]
+
+    this_sweep_gaps = _not_held_entries(structured)
+    this_sweep_count = len(this_sweep_gaps)
+
     result = {"email": "skipped", "sms": "skipped", "errors": []}
 
-    if finding_count == 0 and NOTIFY_ON != "always":
+    if this_sweep_count == 0 and NOTIFY_ON != "always":
         result["reason"] = (
-            "No new findings; LEMIEUX_NOTIFY_ON=findings. Nothing sent."
+            "No new not_held findings this sweep; LEMIEUX_NOTIFY_ON=findings. "
+            "Nothing sent."
         )
         return result
 
+    # Email subject reflects the total unacquired backlog, not just today.
+    total_unacquired = len(_ledger_not_held())
+    subject = (
+        f"{subject_prefix}: {this_sweep_count} new, {total_unacquired} open"
+        if this_sweep_count
+        else f"{subject_prefix}: nothing new, {total_unacquired} open"
+    )
+
     if EMAIL_TO:
-        subject = (
-            f"{subject_prefix}: {finding_count} new"
-            if finding_count
-            else f"{subject_prefix}: nothing new"
-        )
+        body = _email_body(structured)
         try:
-            _send(EMAIL_TO, subject, report or "(empty report)")
+            _send(EMAIL_TO, subject, body or "(no not_held releases)")
             result["email"] = f"sent to {EMAIL_TO}"
         except NotifyError as exc:
             result["errors"].append(f"email: {exc}")
             result["email"] = "failed"
 
-    if SMS_TO and finding_count:
+    if SMS_TO and this_sweep_count:
+        body = _sms_body(structured)
         try:
             # Carrier gateways turn the subject into part of the message;
             # an empty subject keeps the text clean.
-            _send(SMS_TO, "", _sms_text(finding_count, titles))
+            _send(SMS_TO, "", body or "Lemieux: new release found.")
             result["sms"] = f"sent to {SMS_TO}"
         except NotifyError as exc:
             result["errors"].append(f"sms: {exc}")
