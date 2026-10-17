@@ -28,7 +28,7 @@ from lemieux.watch import run_sweep as _run_sweep
 
 try:
     from fastapi import Depends, FastAPI, HTTPException, Request, Response
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, StreamingResponse
     from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 except ImportError as exc:  # pragma: no cover - runtime guard for missing deps
     raise ImportError(
@@ -93,11 +93,17 @@ def _authed(request: Request) -> bool:
     if token and token in _AUTH_TOKENS:
         return True
 
-    # Bearer fallback (e.g. localStorage-stored password)
+    # Bearer fallback (e.g. localStorage-stored password via HTTP header).
     auth_header = request.headers.get("authorization", "")
     if auth_header.lower().startswith("bearer "):
         if auth_header.split(None, 1)[1] == config.WEB_PASSWORD:
             return True
+
+    # Same bearer fallback via query string, because EventSource cannot set
+    # custom headers and some mobile contexts need an alternate credential path.
+    bearer = request.query_params.get("bearer", "")
+    if bearer and bearer == config.WEB_PASSWORD:
+        return True
 
     return False
 
@@ -236,6 +242,65 @@ async def sweep(request: Request, response: Response) -> dict:
         outcome = {"reason": "No not_held findings; nothing sent.", "email": "skipped", "sms": "skipped"}
 
     return {"report": report, "entries": entries, "count": len(entries), "notify": outcome}
+
+
+@app.get("/sweep-stream")
+async def sweep_stream(request: Request, response: Response):
+    require_auth(request, response)
+
+    async def event_stream():
+        import asyncio
+
+        queue: list[str] = []
+        completed: dict = {}
+
+        def progress_callback(message: str):
+            queue.append(message)
+
+        def run_sweep_sync():
+            try:
+                report, entries = _run_sweep(
+                    config.WATCH_ARTISTS, verbose=False,
+                    progress_callback=progress_callback,
+                )
+                if entries:
+                    outcome = notify(report, entries)
+                else:
+                    outcome = {
+                        "reason": "No not_held findings; nothing sent.",
+                        "email": "skipped",
+                        "sms": "skipped",
+                    }
+                completed["payload"] = {
+                    "report": report,
+                    "entries": entries,
+                    "count": len(entries),
+                    "notify": outcome,
+                }
+            except Exception as exc:
+                logger.error("sweep_stream failed: %s\n%s", exc, traceback.format_exc())
+                completed["error"] = str(exc)
+
+        loop = asyncio.get_event_loop()
+        sweep_task = loop.run_in_executor(None, run_sweep_sync)
+
+        while not sweep_task.done() or queue:
+            if queue:
+                msg = queue.pop(0)
+                yield f"event: progress\ndata: {json.dumps({'message': msg})}\n\n"
+            else:
+                await asyncio.sleep(0.5)
+
+        if "error" in completed:
+            yield f"event: error\ndata: {json.dumps({'error': completed['error']})}\n\n"
+        else:
+            yield f"event: done\ndata: {json.dumps(completed['payload'])}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/health")

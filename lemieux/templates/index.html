@@ -243,17 +243,79 @@
       checkAuth();
     });
 
-    document.getElementById('sweep-btn').addEventListener('click', async () => {
+    function appendAssistantBubble() {
+      if (emptyState) emptyState.style.display = 'none';
+      const wrapper = document.createElement('div');
+      wrapper.className = 'flex justify-start';
+      const bubble = document.createElement('div');
+      bubble.className = 'bg-stone-800 border border-stone-700 rounded-lg rounded-tl-none px-4 py-2 max-w-[90%]';
+      wrapper.appendChild(bubble);
+      messagesEl.appendChild(wrapper);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return bubble;
+    }
+
+    function startEventSource(url) {
+      const fallbackPwd = localStorage.getItem('lemieux-password');
+      if (fallbackPwd) {
+        url += (url.includes('?') ? '&' : '?') + 'bearer=' + encodeURIComponent(fallbackPwd);
+      }
+      return new EventSource(url, { withCredentials: true });
+    }
+
+    document.getElementById('sweep-btn').addEventListener('click', () => {
       appendMessage('user', '[Run release sweep]', []);
       typingEl.classList.remove('hidden');
-      try {
-        const data = await apiCall('/sweep', {});
+
+      const bubble = appendAssistantBubble();
+      const progressList = document.createElement('ul');
+      progressList.className = 'text-sm space-y-1 text-stone-400';
+      bubble.appendChild(progressList);
+
+      const es = startEventSource('/sweep-stream');
+
+      es.addEventListener('progress', e => {
+        try {
+          const msg = JSON.parse(e.data).message;
+          const li = document.createElement('li');
+          li.textContent = msg;
+          progressList.appendChild(li);
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        } catch (_) {}
+      });
+
+      es.addEventListener('done', e => {
+        es.close();
         typingEl.classList.add('hidden');
-        appendMessage('assistant', data.report || 'Sweep complete. No report text returned.', data.tools);
-      } catch (err) {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.count === 0) {
+            bubble.textContent = 'Sweep complete. No new not_held findings.';
+          } else {
+            bubble.innerHTML = escapeHtml(data.report || `Sweep complete — ${data.count} finding(s).`).replace(/\n/g, '<br>');
+          }
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        } catch (err) {
+          bubble.textContent = 'Received sweep result, but could not parse it.';
+        }
+      });
+
+      es.addEventListener('error', e => {
+        es.close();
         typingEl.classList.add('hidden');
-        appendMessage('assistant', `Sweep error: ${err.message}`, []);
-      }
+        try {
+          const data = JSON.parse(e.data);
+          appendMessage('assistant', `Sweep error: ${data.error}`, []);
+        } catch (_) {
+          appendMessage('assistant', 'Sweep stream closed unexpectedly.', []);
+        }
+      });
+
+      es.onerror = () => {
+        es.close();
+        typingEl.classList.add('hidden');
+        appendMessage('assistant', 'Sweep stream connection failed.', []);
+      };
     });
 
     passwordInput.addEventListener('keydown', e => { if (e.key === 'Enter') passwordSubmit.click(); });

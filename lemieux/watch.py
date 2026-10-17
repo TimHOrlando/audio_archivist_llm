@@ -128,8 +128,17 @@ def committed_entries(messages: list[dict]) -> list[dict]:
     return entries
 
 
-def run_sweep(artists: list[str], verbose: bool = True) -> tuple[str, list[dict]]:
-    """Run one sweep. Returns (report text, structured entries recorded this run)."""
+def run_sweep(artists: list[str], verbose: bool = True,
+             progress_callback=None) -> tuple[str, list[dict]]:
+    """Run one sweep. Returns (report text, structured entries recorded this run).
+
+    If `progress_callback` is provided, call it with descriptive status
+    strings such as "Building Plex inventory..." or "Searching Grateful
+    Dead..." so live listeners (e.g. the web UI) can surface progress.
+    """
+    if progress_callback:
+        progress_callback(f"Starting sweep for {len(artists)} artist(s)")
+
     client = _get_client()
     messages = _seed_messages()
     messages.append(
@@ -142,11 +151,35 @@ def run_sweep(artists: list[str], verbose: bool = True) -> tuple[str, list[dict]
         }
     )
 
-    messages = run_turn(client, messages, verbose=verbose)
+    def _tool_cb(kind: str, data: dict):
+        if not progress_callback:
+            return
+        name = data.get("name")
+        args = data.get("arguments") or {}
+        if name == "plex_query" and args.get("operation") == "inventory":
+            progress_callback("Building Plex inventory...")
+        elif name == "web_search":
+            progress_callback(f"Searching: {args.get('query', '')[:60]}...")
+        elif name == "release_ledger" and args.get("operation") == "commit":
+            progress_callback("Committing findings to ledger...")
+        else:
+            # plex_query "have" and release_ledger "check" happen frequently;
+            # skip most to avoid noise, but keep the user feeling motion.
+            op = args.get("operation")
+            if name == "plex_query" and op:
+                progress_callback(f"Checking Plex: {op}")
+
+    messages = run_turn(client, messages, verbose=verbose, stream_callback=_tool_cb)
     # Every assistant message, not just the last: the report is often written
     # alongside the final commit call, and taking messages[-1] would return
     # only the closing acknowledgement.
-    return assistant_text(messages), committed_entries(messages)
+    report = assistant_text(messages)
+    entries = committed_entries(messages)
+    if progress_callback:
+        held = sum(1 for e in entries if e.get("verdict") == "held")
+        not_held = sum(1 for e in entries if e.get("verdict") == "not_held")
+        progress_callback(f"Sweep complete — {len(entries)} recorded ({not_held} not held, {held} held)")
+    return report, entries
 
 
 def main() -> int:
