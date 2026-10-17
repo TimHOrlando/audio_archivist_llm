@@ -56,7 +56,7 @@ _load_dotenv()
 # Point straight at a base model. The persona is injected as a system message
 # at runtime (see prompt.py), so no `ollama create` step is required — and
 # deriving a model from a :cloud base is what produced "does not support chat".
-MODEL = os.getenv("LEMIEUX_MODEL", "kimi-k3:cloud")
+MODEL = os.getenv("LEMIEUX_MODEL", "qwen3:14b")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
 # Inject the Modelfile's SYSTEM block as a system message. Set to 0/false only

@@ -3,7 +3,7 @@
 # ------------------------------------------------------------------------------
 # Build:   ollama create lemieux -f Modelfile
 # Run:     ollama run lemieux
-# Base:    kimi-k3:cloud  (2.81T params, MXFP4, 1M ctx, tools + thinking + vision)
+# Base:    qwen3:14b  (local Ollama, tool-capable)
 #
 # NOTE: This Modelfile defines PERSONA + POLICY only. All real capability
 # (Plex queries, filesystem ops, web search) must be supplied as tools via the
@@ -11,7 +11,7 @@
 # HOW those tools get used.
 # ==============================================================================
 
-FROM kimi-k3:cloud
+FROM qwen3:14b
 
 # --- Inference parameters -----------------------------------------------------
 # Low temperature: an archivist is precise, not creative. Catalog data must not
@@ -21,10 +21,8 @@ PARAMETER top_p 0.85
 PARAMETER top_k 40
 PARAMETER repeat_penalty 1.05
 
-# kimi-k3:cloud advertises 1,048,576 tokens of context, but context is managed
-# server-side for :cloud models, so this is effectively a no-op there. It is
-# kept for when this Modelfile is retargeted at a local base (gpt-oss:120b and
-# qwen3-coder:30b are both tool-capable and already pulled).
+# qwen3:14b supports a 128K context window. This parameter sets the working
+# context size when the model is run locally; cloud models may ignore it.
 PARAMETER num_ctx 131072
 
 SYSTEM """
