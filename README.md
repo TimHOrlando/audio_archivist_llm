@@ -205,18 +205,23 @@ A FastAPI web app (`lemieux/web.py`) serves a mobile-first chat UI. It runs on
 ask it anything about the library and trigger manual release sweeps.
 
 ```bash
-python -m uvicorn lemieux.web:app --host 0.0.0.0 --port 8000
+python -m uvicorn lemieux.web:app --host 0.0.0.0 --port 8080
 ```
 
-Open `http://hal9003:8000` in your phone browser (or the Tailscale address).
-The UI asks once for the password stored in `.env`.
+Open `http://hal9003:8080` in your phone browser (or the Tailscale address).
+The UI authenticates with the password from `.env` via an HTTP-only cookie and
+shows a **Log out** button; sessions last 30 days.
 
 ### Endpoints
 
 - `GET /` — chat UI
+- `POST /login` — authenticate and set the `lemieux_auth` cookie
+- `POST /logout` — clear the auth cookie and session
+- `GET /auth-check` — verify the current auth cookie
 - `POST /chat` — send a message, get the assistant reply
 - `POST /session` — clear the current conversation
 - `POST /sweep` — run the release sweep manually (sends email/SMS if configured)
+- `GET /sweep-stream` — Server-Sent Events stream of a sweep with live progress
 - `GET /health` — liveness check
 
 ### systemd service
@@ -239,8 +244,9 @@ Run the release watch every Monday at 6 PM EST (22:00 UTC):
 0 22 * * 1 /opt/lemieux/.venv/bin/python -m lemieux.watch --notify
 ```
 
-The web chat's “Run sweep” button calls `/sweep`, which also performs the same
-email/SMS notification step.
+The web chat's **Run sweep** button connects to `/sweep-stream`, so progress
+messages like “Building Plex inventory...” appear in the chat as the sweep runs.
+It still performs the same email/SMS notification step at the end.
 
 ## Not yet built
 
@@ -250,6 +256,7 @@ email/SMS notification step.
   against one assumed convention (official box sets and downloaded shows use
   different folder forms)
 - Voice input in the chat UI
+- Live progress for regular `/chat` tool calls (only the sweep streams today)
 
 ## Notes
 
