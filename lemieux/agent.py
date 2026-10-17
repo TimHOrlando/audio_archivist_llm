@@ -85,11 +85,16 @@ def _normalize_tool_call(call) -> tuple[str, dict]:
     return name, dict(raw_args or {})
 
 
-def run_turn(client, messages: list[dict], verbose: bool = True) -> list[dict]:
+def run_turn(client, messages: list[dict], verbose: bool = True,
+             stream_callback=None) -> list[dict]:
     """Drive one user turn to completion, resolving tool calls along the way.
 
     Returns the updated message list. Appends every assistant and tool message
     so the transcript stays intact across turns.
+
+    If `stream_callback` is provided, it is called with ("tool", {"name": ...,
+    "arguments": ...}) before a tool runs, giving a caller such as a web app a
+    chance to show live progress.
     """
     for iteration in range(config.MAX_TOOL_ITERATIONS):
         response = client.chat(
@@ -110,6 +115,9 @@ def run_turn(client, messages: list[dict], verbose: bool = True) -> list[dict]:
             name, arguments = _normalize_tool_call(call)
             if verbose:
                 print(f"  → {name}({json.dumps(arguments, default=str)})", flush=True)
+
+            if stream_callback:
+                stream_callback("tool", {"name": name, "arguments": arguments})
 
             result = call_tool(name, arguments)
 

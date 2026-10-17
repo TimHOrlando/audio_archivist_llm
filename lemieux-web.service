@@ -1,0 +1,16 @@
+[Unit]
+Description=Lemieux web chat
+After=network.target
+
+[Service]
+Type=simple
+User=tim
+Group=tim
+WorkingDirectory=/opt/lemieux
+Environment=PATH=/opt/lemieux/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/lemieux/.venv/bin/uvicorn lemieux.web:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -199,11 +199,40 @@ def _op_sections() -> dict:
     return result
 
 
-def _op_search(section: str | None, query: str | None, limit: int | None) -> dict:
-    """Search albums within a section (or across all music sections)."""
+def _search_results(targets, query: str, libtype: str) -> list[dict]:
+    """Run a Plex search across a list of sections."""
+    results = []
+    for target in targets:
+        try:
+            found = target.search(title=query, libtype=libtype)
+        except Exception as exc:
+            raise SafetyError(f"Search failed: {scrub(str(exc))}") from exc
+        for item in found:
+            row: dict = {"title": item.title, "section": target.title}
+            if libtype == "album":
+                row.update(_album_row(item))
+            elif libtype == "track":
+                row.update({
+                    "artist": getattr(item, "grandparentTitle", None),
+                    "album_artist": getattr(item, "originalTitle", None) or getattr(item, "parentTitle", None),
+                    "album": getattr(item, "parentTitle", None),
+                    "index": getattr(item, "index", None),
+                    "duration_sec": round((item.duration or 0) / 1000, 1) if hasattr(item, "duration") else None,
+                    "deep_link": _deep_link(item.ratingKey),
+                })
+            results.append(row)
+    return results
+
+
+def _op_search(section: str | None, query: str | None, limit: int | None,
+               libtype: str = "album") -> dict:
+    """Search albums or tracks within a section (or across all music sections)."""
     plex = _connect()
     if not query:
         raise SafetyError("The 'query' argument is required for operation 'search'.")
+
+    if libtype not in {"album", "track"}:
+        raise SafetyError(f"Unsupported libtype '{libtype}' for search.")
 
     if section:
         try:
@@ -215,23 +244,22 @@ def _op_search(section: str | None, query: str | None, limit: int | None) -> dic
     else:
         targets = [s for s in plex.library.sections() if s.type == "artist"]
 
-    results = []
-    for target in targets:
-        try:
-            found = target.search(title=query, libtype="album")
-        except Exception as exc:
-            raise SafetyError(f"Search failed: {scrub(str(exc))}") from exc
-        for album in found:
-            results.append({**_album_row(album), "section": target.title})
-
+    results = _search_results(targets, query, libtype)
     results, truncated = cap_rows(results, limit)
     return {
         "query": query,
+        "libtype": libtype,
         "sections_searched": [t.title for t in targets],
         "match_count": len(results),
         "truncated": truncated,
-        "albums": results,
+        "results": results,
+        "note": "Result order is not meaningful; use rating_key to request track listings.",
     }
+
+
+def _op_track_search(section: str | None, query: str | None, limit: int | None) -> dict:
+    """Search tracks by title."""
+    return _op_search(section, query, limit, libtype="track")
 
 
 def _op_albums(section: str | None, limit: int | None) -> dict:
@@ -396,6 +424,66 @@ def _op_have(query: str | None) -> dict:
     return result
 
 
+def _op_artist_summary(section: str | None, query: str | None) -> dict:
+    """Summary of an artist's holdings in one or all music sections.
+
+    Returns album count, track count, and a sample of titles. Useful when a
+    user asks 'how many X songs/albums do I have?' and the intent is a count
+    rather than a list.
+    """
+    plex = _connect()
+    if not query or not query.strip():
+        raise SafetyError("The 'query' argument is required for operation 'artist_summary'.")
+
+    if section:
+        try:
+            targets = [plex.library.section(section)]
+        except Exception as exc:
+            raise SafetyError(
+                f"No library section named '{section}': {scrub(str(exc))}"
+            ) from exc
+    else:
+        targets = [s for s in plex.library.sections() if s.type == "artist"]
+
+    artist_name = query.strip()
+    total_albums = 0
+    total_tracks = 0
+    album_titles: set[str] = set()
+    sample_tracks: list[dict] = []
+
+    for target in targets:
+        try:
+            artists = target.search(title=artist_name, libtype="artist")
+        except Exception as exc:
+            raise SafetyError(f"Artist search failed: {scrub(str(exc))}") from exc
+        for artist in artists:
+            for album in artist.albums():
+                total_albums += 1
+                album_titles.add(album.title)
+                tracks = album.tracks() if hasattr(album, "tracks") else []
+                total_tracks += len(tracks)
+                for track in tracks:
+                    if len(sample_tracks) < 5:
+                        sample_tracks.append({
+                            "title": track.title,
+                            "album": album.title,
+                            "index": track.index,
+                        })
+
+    return {
+        "artist": artist_name,
+        "sections_searched": [t.title for t in targets],
+        "album_count": total_albums,
+        "track_count": total_tracks,
+        "album_titles": sorted(album_titles),
+        "sample_tracks": sample_tracks,
+        "note": (
+            "Counts are unique to this Plex library; the same artist may "
+            "appear under variants (e.g. 'Grateful Dead' vs 'The Grateful Dead')."
+        ),
+    }
+
+
 def plex_query(
     operation: str,
     section: str | None = None,
@@ -408,10 +496,14 @@ def plex_query(
         return _op_sections()
     if operation == "search":
         return _op_search(section, query, limit)
+    if operation == "track_search":
+        return _op_track_search(section, query, limit)
     if operation == "albums":
         return _op_albums(section, limit)
     if operation == "tracks":
         return _op_tracks(rating_key)
+    if operation == "artist_summary":
+        return _op_artist_summary(section, query)
     if operation == "inventory":
         return _op_inventory(limit)
     if operation == "have":
@@ -419,5 +511,6 @@ def plex_query(
 
     raise SafetyError(
         f"Unknown operation '{operation}'. "
-        "Valid: sections, search, albums, tracks, inventory, have"
+        "Valid: sections, search, track_search, albums, tracks, artist_summary, "
+        "inventory, have"
     )

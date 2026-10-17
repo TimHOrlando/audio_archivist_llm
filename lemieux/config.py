@@ -139,7 +139,7 @@ WATCH_ARTISTS = [
     a.strip()
     for a in os.getenv(
         "LEMIEUX_WATCH_ARTISTS",
-        "Grateful Dead|Jerry Garcia|Jerry Garcia Band|Dead & Company",
+        "Grateful Dead|Dead|Further|Dead & Company|The Warlocks|Jerry Garcia|Jerry Garcia Band",
     ).split("|")
     if a.strip()
 ]
@@ -178,6 +178,15 @@ SHOW_FOLDER_PATTERN = (
 )
 
 
+# -----------------------------------------------------------------------------
+# Web chat
+# -----------------------------------------------------------------------------
+
+WEB_HOST = os.getenv("LEMIEUX_WEB_HOST", "0.0.0.0")
+WEB_PORT = int(os.getenv("LEMIEUX_WEB_PORT", "8000"))
+WEB_PASSWORD = os.getenv("LEMIEUX_WEB_PASSWORD")
+
+
 def config_report() -> dict:
     """Non-secret snapshot of effective config, for startup display."""
     return {
@@ -190,4 +199,7 @@ def config_report() -> dict:
         "media_roots": [str(p) for p in MEDIA_ROOTS],
         "roots_mounted": {str(p): p.is_dir() for p in MEDIA_ROOTS},
         "max_result_rows": MAX_RESULT_ROWS,
+        "web_host": WEB_HOST,
+        "web_port": WEB_PORT,
+        "web_password_set": bool(WEB_PASSWORD),
     }

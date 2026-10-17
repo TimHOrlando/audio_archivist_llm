@@ -35,12 +35,16 @@ lemieux/
   prompt.py               pulls the SYSTEM block out of the Modelfile
   registry.py             tool schemas + dispatch
   agent.py                tool-calling loop and interactive CLI
+  web.py                  FastAPI web chat + manual sweep trigger
   watch.py                release sweep, for cron
   tools/
-    plex.py               plex_query  — sections, search, albums, tracks,
+    plex.py               plex_query  — sections, search, track_search,
+                                        albums, tracks, artist_summary,
                                         inventory, have
     fs.py                 fs_inspect  — list, stat, tags, audit, find, read_text
     search.py             web_search  — release announcements (untrusted input)
+    catalog.py            catalog_lookup  — MusicBrainz artist discographies
+lemieux-web.service       systemd unit template for the web app
 ```
 
 ## Setup
@@ -48,7 +52,7 @@ lemieux/
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env        # fill in PLEX_TOKEN, OLLAMA_API_KEY, SMTP
+cp .env.example .env        # fill in PLEX_TOKEN, OLLAMA_API_KEY, SMTP, WEB password
 python -m lemieux.agent --check
 ```
 
@@ -72,6 +76,9 @@ python -m lemieux.watch --artist "Jerry Garcia Band"
 python -m lemieux.watch --notify                 # sweep all artists and notify
 python -m lemieux.watch --ledger                 # what has been reported
 python -m lemieux.watch --notify-check           # notification config
+
+# Web chat (or use systemd)
+python -m uvicorn lemieux.web:app --host 0.0.0.0 --port 8000
 ```
 
 Tool calls and results are echoed as they happen, so you can see exactly what
@@ -92,7 +99,7 @@ same guarantee as code.
 | No write verbs | absence from `registry.DISPATCH` | The model cannot call what does not exist |
 | Row caps | `safety.cap_rows` | A "list everything" call can't blow out context; `truncated` is surfaced so partial lists are never reported as complete |
 | Token scrubbing | `safety.scrub` | The Plex token is stripped from exceptions and URLs before reaching the model |
-| Iteration ceiling | `config.MAX_TOOL_ITERATIONS` | A confused model can't loop on the filesystem; on exhaustion it is forced to write a final report from what it gathered |
+| Iteration ceiling | `config.MAX_TOOL_ITERATIONS` | A confused model can't loop on the filesystem; on exhaustion it is forced to write a final report from what it already gathered |
 | Structured refusals | `registry.call_tool` | Refusals return JSON, not exceptions — the model explains rather than blindly retries |
 
 The path jail genuinely cannot be talked around. A prompt rule can. Where a
@@ -155,6 +162,11 @@ releases are silenced after one report unless verdict/status/date changes.
 notice. Pages about collectible box sets are exactly where text aimed at an
 agent would be planted. Nothing in a search result can authorize an action.
 
+The new `catalog_lookup` tool uses MusicBrainz as a catalog reference, but its
+results are also treated as **untrusted evidence** about what exists — not as
+proof that Tim lacks an album. Compilations, box sets, and variant titles mean
+a "missing" album may already be in the library under a different name.
+
 ## Notifications
 
 Only releases with a **definite `not_held` verdict** trigger an email or SMS.
@@ -186,6 +198,50 @@ stop arriving while email still works, the gateway is the first suspect. Raw
 URLs are used for now; a short-link adapter can be added later without changing
 the templates.
 
+## Web chat
+
+A FastAPI web app (`lemieux/web.py`) serves a mobile-first chat UI. It runs on
+`hal9003` and is reachable over Tailscale or your LAN. From your phone you can
+ask it anything about the library and trigger manual release sweeps.
+
+```bash
+python -m uvicorn lemieux.web:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://hal9003:8000` in your phone browser (or the Tailscale address).
+The UI asks once for the password stored in `.env`.
+
+### Endpoints
+
+- `GET /` — chat UI
+- `POST /chat` — send a message, get the assistant reply
+- `POST /session` — clear the current conversation
+- `POST /sweep` — run the release sweep manually (sends email/SMS if configured)
+- `GET /health` — liveness check
+
+### systemd service
+
+Copy `lemieux-web.service` to `/etc/systemd/system/lemieux-web.service` after
+updating `WorkingDirectory` and the `User` to match your install. Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable lemieux-web.service
+sudo systemctl start lemieux-web.service
+sudo systemctl status lemieux-web.service
+```
+
+### Release watch cron
+
+Run the release watch every Monday at 6 PM EST (22:00 UTC):
+
+```bash
+0 22 * * 1 /opt/lemieux/.venv/bin/python -m lemieux.watch --notify
+```
+
+The web chat's “Run sweep” button calls `/sweep`, which also performs the same
+email/SMS notification step.
+
 ## Not yet built
 
 - `fs_mutate` — retag/rename/move, `dry_run=True` default, manifest required
@@ -193,7 +249,7 @@ the templates.
 - `audit` reworked to report observed structure per tree rather than judging
   against one assumed convention (official box sets and downloaded shows use
   different folder forms)
-- Scheduled execution on the Plex host
+- Voice input in the chat UI
 
 ## Notes
 
@@ -201,5 +257,5 @@ the templates.
 been exercised against a real library. Run it against one known-good show
 folder before trusting its output.
 
-The ledger (`release_ledger.json`) and `.env` are per-install state and are
-gitignored.
+The ledger (`release_ledger.json`), `.env`, and any session state are per-install
+state and are gitignored.

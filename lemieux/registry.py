@@ -12,6 +12,7 @@ import json
 
 from .ledger import LedgerError, release_ledger
 from .safety import SafetyError
+from .tools.catalog import catalog_lookup
 from .tools.fs import fs_inspect
 from .tools.plex import plex_query
 from .tools.search import web_search
@@ -34,8 +35,10 @@ TOOL_SCHEMAS = [
                         "enum": [
                             "sections",
                             "search",
+                            "track_search",
                             "albums",
                             "tracks",
+                            "artist_summary",
                             "inventory",
                             "have",
                         ],
@@ -43,8 +46,11 @@ TOOL_SCHEMAS = [
                             "sections: list library sections (start here to "
                             "orient). "
                             "search: find albums by title. "
+                            "track_search: find tracks by title. "
                             "albums: every album in one section. "
                             "tracks: track listing for one album. "
+                            "artist_summary: album and track count for an "
+                            "artist. "
                             "inventory: every held album title across all "
                             "music sections, deduplicated. "
                             "have: decide whether a candidate release is "
@@ -58,13 +64,15 @@ TOOL_SCHEMAS = [
                         "type": "string",
                         "description": (
                             "Library section title, e.g. \"Dave's Picks\". "
-                            "Required for 'albums'; optional filter for 'search'."
+                            "Required for 'albums'; optional filter for "
+                            "'search', 'track_search', and 'artist_summary'."
                         ),
                     },
                     "query": {
                         "type": "string",
                         "description": (
-                            "For 'search': an album title to look for. "
+                            "For 'search'/'track_search': a title to look for. "
+                            "For 'artist_summary': an artist name. "
                             "For 'have': the candidate release title to test "
                             "against holdings."
                         ),
@@ -181,6 +189,41 @@ TOOL_SCHEMAS.append(
     {
         "type": "function",
         "function": {
+            "name": "catalog_lookup",
+            "description": (
+                "Look up an artist's canonical album catalog on MusicBrainz. "
+                "Use this as a REFERENCE when answering questions like 'How "
+                "many Jimi Hendrix albums do I have?' or 'What Rolling Stones "
+                "records am I missing?'. Then cross-check the returned titles "
+                "with plex_query operations 'search', 'albums', or 'have' "
+                "before claiming anything is missing. MusicBrainz is a catalog "
+                "authority, not proof of a gap."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "artist": {
+                        "type": "string",
+                        "description": (
+                            "Artist name to look up, e.g. 'Jimi Hendrix' or "
+                            "'The Rolling Stones'."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max albums to return. Server ceiling still applies.",
+                    },
+                },
+                "required": ["artist"],
+            },
+        },
+    }
+)
+
+TOOL_SCHEMAS.append(
+    {
+        "type": "function",
+        "function": {
             "name": "release_ledger",
             "description": (
                 "Tracks which releases have already been reported to Tim, so "
@@ -248,6 +291,7 @@ DISPATCH = {
     "fs_inspect": fs_inspect,
     "web_search": web_search,
     "release_ledger": release_ledger,
+    "catalog_lookup": catalog_lookup,
 }
 
 
